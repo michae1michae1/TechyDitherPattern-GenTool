@@ -55,6 +55,7 @@ npm run preview
 ## Technologies
 
 - React 18
+- TypeScript
 - Vite
 - Tailwind CSS
 - Lucide React (icons)
@@ -66,13 +67,14 @@ npm run preview
 .
 ├── index.html
 ├── package.json
-├── vite.config.js
+├── vite.config.ts
 ├── tailwind.config.js
 ├── postcss.config.js
+├── tsconfig.json
 └── src/
-    ├── main.jsx
-    ├── App.jsx
-    ├── TechDitherGenerator.jsx
+    ├── main.tsx
+    ├── App.tsx
+    ├── TechDitherGenerator.tsx
     └── index.css
 ```
 
