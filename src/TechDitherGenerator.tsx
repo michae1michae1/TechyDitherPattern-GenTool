@@ -306,11 +306,16 @@ const DitheredPatternGenerator = () => {
         }
       }
     } else if (config.pattern === 'static') {
+      // True TV static - rapidly changing random noise
+      const frameOffset = (frame * 17) % randomSeedRef.current.length; // Use prime number for better distribution
+      
       for (let i = 0; i < cols; i++) {
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
           const shapeBrightness = getShapeBrightness(i, j, cols, rows);
-          const seedIndex = (i * rows + j + frame) % randomSeedRef.current.length;
+          // Use frame offset to get different random values each frame for static effect
+          const baseSeedIndex = (i * rows + j) % randomSeedRef.current.length;
+          const seedIndex = (baseSeedIndex + frameOffset) % randomSeedRef.current.length;
           
           if (randomSeedRef.current[seedIndex].r1 < config.density * shapeBrightness) {
             const brightness = config.gradient ? randomSeedRef.current[seedIndex].r2 * shapeBrightness : shapeBrightness;
@@ -333,13 +338,31 @@ const DitheredPatternGenerator = () => {
         }
       }
     } else if (config.pattern === 'glitch') {
+      // Glitch effect - mostly stable with occasional distortions
+      // Glitch triggers in bursts every 30-80 frames
+      const glitchCycle = frame % 80;
+      const isGlitching = glitchCycle < 5 || (glitchCycle > 30 && glitchCycle < 35);
+      const glitchIntensity = isGlitching ? (Math.sin(frame * 0.5) + 1) / 2 : 0;
+      
       for (let i = 0; i < cols; i++) {
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
           const shapeBrightness = getShapeBrightness(i, j, cols, rows);
-          const seedIndex = (i * rows + j + frame) % randomSeedRef.current.length;
-          const glitch = randomSeedRef.current[seedIndex].r1 < 0.05 ? randomSeedRef.current[seedIndex].r2 : 0;
-          const offsetX = glitch * (randomSeedRef.current[seedIndex].r3 - 0.5) * 20;
+          // Stable base pattern (no frame in calculation)
+          const seedIndex = (i * rows + j) % randomSeedRef.current.length;
+          
+          // Apply glitch effects only during glitch periods
+          let offsetX = 0;
+          let offsetY = 0;
+          if (isGlitching) {
+            // Use frame to vary glitch effect
+            const glitchSeedIndex = (seedIndex + frame) % randomSeedRef.current.length;
+            const shouldGlitch = randomSeedRef.current[glitchSeedIndex].r1 < 0.15; // 15% of cells glitch
+            if (shouldGlitch) {
+              offsetX = (randomSeedRef.current[glitchSeedIndex].r2 - 0.5) * 30 * glitchIntensity;
+              offsetY = (randomSeedRef.current[glitchSeedIndex].r3 - 0.5) * 10 * glitchIntensity;
+            }
+          }
           
           if (randomSeedRef.current[seedIndex].r2 < config.density * shapeBrightness) {
             const brightness = config.gradient ? (0.5 + randomSeedRef.current[seedIndex].r3 * 0.5) * shapeBrightness : shapeBrightness;
@@ -356,7 +379,7 @@ const DitheredPatternGenerator = () => {
             ctx.fillText(
               symbols[symbolIndex],
               iCellPos + offsetX,
-              j * cellSize + halfCell
+              j * cellSize + halfCell + offsetY
             );
           }
         }
