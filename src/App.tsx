@@ -1,4 +1,4 @@
-import DitheredPatternGenerator from './TechDitherGenerator'
+import DitheredPatternGenerator from './components/DitheredPatternGenerator'
 
 function App() {
   return <DitheredPatternGenerator />
