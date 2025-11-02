@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Play, Pause, Download, RefreshCw, ChevronLeft, ChevronRight, Upload, X } from 'lucide-react';
+import { RxDragHandleDots2 } from 'react-icons/rx';
+import { Eye, EyeOff, Plus, Trash2, ChevronDown, ChevronRight as ChevronRightIcon } from 'lucide-react';
 
 interface Drop {
   x: number;
@@ -14,16 +16,43 @@ interface RandomSeed {
   r3: number;
 }
 
+interface LayerConfig {
+  symbolSet: string;
+  density: number;
+  cellSize: number;
+  color: string;
+  bgColor: string;
+  animationSpeed: number;
+  pattern: string;
+  gradient: boolean;
+  glowEffect: boolean;
+  shapeInfluence: number;
+  gradientStrength: number;
+  glowIntensity: number;
+  glowRadius: number;
+}
+
+interface Layer {
+  id: string;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  config: LayerConfig;
+  shapeImage: HTMLImageElement | null;
+  shapeData: number[][] | null;
+}
+
 const DitheredPatternGenerator = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
   const dropsRef = useRef<Drop[]>([]);
   const randomSeedRef = useRef<RandomSeed[]>([]);
   const frameCounterRef = useRef(0);
   const lastFrameTimeRef = useRef(0);
   
-  const [config, setConfig] = useState({
+  // Helper function to create a default layer config
+  const createDefaultLayerConfig = (): LayerConfig => ({
     symbolSet: '01',
     density: 0.7,
     cellSize: 12,
@@ -33,15 +62,35 @@ const DitheredPatternGenerator = () => {
     pattern: 'rain',
     gradient: true,
     glowEffect: true,
-    shapeInfluence: 0.8
+    shapeInfluence: 0.8,
+    gradientStrength: 0.8,
+    glowIntensity: 10,
+    glowRadius: 10
   });
+
+  // Initialize with one default layer
+  const [layers, setLayers] = useState<Layer[]>([{
+    id: 'layer-1',
+    name: 'Layer 1',
+    visible: true,
+    opacity: 1,
+    config: createDefaultLayerConfig(),
+    shapeImage: null,
+    shapeData: null
+  }]);
+
+  const [activeLayerId, setActiveLayerId] = useState<string>('layer-1');
+  const [expandedLayerIds, setExpandedLayerIds] = useState<Set<string>>(new Set(['layer-1']));
+  const [draggedLayerId, setDraggedLayerId] = useState<string | null>(null);
+  
+  // Get active layer (for convenience)
+  const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0];
+  const config = activeLayer.config;
   
   const [debouncedCellSize, setDebouncedCellSize] = useState(config.cellSize);
   
   const [isAnimating, setIsAnimating] = useState(false); // Start paused
   const [currentFrame, setCurrentFrame] = useState(0);
-  const [shapeImage, setShapeImage] = useState<HTMLImageElement | null>(null);
-  const [shapeData, setShapeData] = useState<number[][] | null>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
 
   const symbolPresets = {
@@ -60,8 +109,69 @@ const DitheredPatternGenerator = () => {
   // Memoize symbols array
   const symbols = useMemo(() => config.symbolSet.split(''), [config.symbolSet]);
 
-  // Load and process uploaded image
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Layer management functions
+  const updateActiveLayerConfig = (configUpdate: Partial<LayerConfig>) => {
+    setLayers(layers.map(layer => 
+      layer.id === activeLayerId 
+        ? { ...layer, config: { ...layer.config, ...configUpdate } }
+        : layer
+    ));
+  };
+
+  const updateLayerProperty = (layerId: string, updates: Partial<Layer>) => {
+    setLayers(layers.map(layer =>
+      layer.id === layerId ? { ...layer, ...updates } : layer
+    ));
+  };
+
+  const addLayer = () => {
+    if (layers.length >= 3) return;
+    const newId = `layer-${Date.now()}`;
+    const newLayer: Layer = {
+      id: newId,
+      name: `Layer ${layers.length + 1}`,
+      visible: true,
+      opacity: 1,
+      config: createDefaultLayerConfig(),
+      shapeImage: null,
+      shapeData: null
+    };
+    setLayers([...layers, newLayer]);
+    setActiveLayerId(newId);
+    setExpandedLayerIds(new Set([...expandedLayerIds, newId]));
+  };
+
+  const removeLayer = (layerId: string) => {
+    if (layers.length === 1) return; // Keep at least one layer
+    const newLayers = layers.filter(l => l.id !== layerId);
+    setLayers(newLayers);
+    if (activeLayerId === layerId) {
+      setActiveLayerId(newLayers[0].id);
+    }
+    const newExpanded = new Set(expandedLayerIds);
+    newExpanded.delete(layerId);
+    setExpandedLayerIds(newExpanded);
+  };
+
+  const toggleLayerExpand = (layerId: string) => {
+    const newExpanded = new Set(expandedLayerIds);
+    if (newExpanded.has(layerId)) {
+      newExpanded.delete(layerId);
+    } else {
+      newExpanded.add(layerId);
+    }
+    setExpandedLayerIds(newExpanded);
+  };
+
+  const reorderLayers = (fromIndex: number, toIndex: number) => {
+    const newLayers = [...layers];
+    const [removed] = newLayers.splice(fromIndex, 1);
+    newLayers.splice(toIndex, 0, removed);
+    setLayers(newLayers);
+  };
+
+  // Load and process uploaded image for active layer
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, layerId: string) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -69,15 +179,14 @@ const DitheredPatternGenerator = () => {
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
-        setShapeImage(img);
-        processShapeImage(img);
+        processShapeImage(img, layerId);
       };
       img.src = event.target?.result as string;
     };
     reader.readAsDataURL(file);
   };
 
-  const processShapeImage = (img: HTMLImageElement) => {
+  const processShapeImage = (img: HTMLImageElement, layerId: string) => {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -105,12 +214,11 @@ const DitheredPatternGenerator = () => {
       brightnessMap.push(row);
     }
     
-    setShapeData(brightnessMap);
+    updateLayerProperty(layerId, { shapeImage: img, shapeData: brightnessMap });
   };
 
-  const clearShape = () => {
-    setShapeImage(null);
-    setShapeData(null);
+  const clearShape = (layerId: string) => {
+    updateLayerProperty(layerId, { shapeImage: null, shapeData: null });
   };
 
   const stepFrame = (direction: number) => {
@@ -166,24 +274,12 @@ const DitheredPatternGenerator = () => {
     }
   }, [debouncedCellSize]);
 
-  // Memoized shape brightness lookup with cached offset calculation
-  const shapeBrightnessCache = useMemo(() => {
-    if (!shapeData) return null;
+  // Memoized shape brightness lookup with cached offset calculation (per layer)
+  const getShapeBrightnessForLayer = useCallback((x: number, y: number, cols: number, rows: number, layer: Layer) => {
+    if (!layer.shapeData) return 1;
     
-    const shapeWidth = shapeData[0].length;
-    const shapeHeight = shapeData.length;
-    
-    return {
-      shapeWidth,
-      shapeHeight,
-      data: shapeData
-    };
-  }, [shapeData]);
-
-  const getShapeBrightness = useCallback((x: number, y: number, cols: number, rows: number) => {
-    if (!shapeBrightnessCache) return 1;
-    
-    const { shapeWidth, shapeHeight, data } = shapeBrightnessCache;
+    const shapeWidth = layer.shapeData[0].length;
+    const shapeHeight = layer.shapeData.length;
     
     const offsetX = Math.floor((cols - shapeWidth) / 2);
     const offsetY = Math.floor((rows - shapeHeight) / 2);
@@ -192,50 +288,48 @@ const DitheredPatternGenerator = () => {
     const shapeY = y - offsetY;
     
     if (shapeX < 0 || shapeX >= shapeWidth || shapeY < 0 || shapeY >= shapeHeight) {
-      return 1 - config.shapeInfluence;
+      return 1 - layer.config.shapeInfluence;
     }
     
-    const brightness = data[shapeY][shapeX];
-    return brightness * config.shapeInfluence + (1 - config.shapeInfluence);
-  }, [shapeBrightnessCache, config.shapeInfluence]);
+    const brightness = layer.shapeData[shapeY][shapeX];
+    return brightness * layer.config.shapeInfluence + (1 - layer.config.shapeInfluence);
+  }, []);
 
-  // Main render function
-  const renderFrame = useCallback((frame: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
+  // Helper function to render a single layer to a canvas
+  const renderLayerToCanvas = useCallback((layer: Layer, canvas: HTMLCanvasElement, frame: number) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    
+
     const { width, height } = canvasSize;
-    
     if (width === 0 || height === 0) return;
 
-    const cols = Math.floor(width / config.cellSize);
-    const rows = Math.floor(height / config.cellSize);
-    const cellSize = config.cellSize;
+    const layerConfig = layer.config;
+    const layerSymbols = layerConfig.symbolSet.split('');
+    
+    const cols = Math.floor(width / layerConfig.cellSize);
+    const rows = Math.floor(height / layerConfig.cellSize);
+    const cellSize = layerConfig.cellSize;
     const halfCell = Math.floor(cellSize / 2);
 
-    // Clear with background
-    ctx.fillStyle = config.bgColor;
-    ctx.fillRect(0, 0, width, height);
+    // Clear with transparent background (layers composite)
+    ctx.clearRect(0, 0, width, height);
 
     ctx.font = `${cellSize - 2}px monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     // Pre-calculate hex color base for performance
-    const colorBase = config.color;
+    const colorBase = layerConfig.color;
 
-    // Batch shadow blur changes and reduce context state changes
+    // Batch shadow blur changes
     let currentShadowBlur = -1;
     
     // Set glow color once if enabled
-    if (config.glowEffect) {
-      ctx.shadowColor = config.color;
+    if (layerConfig.glowEffect) {
+      ctx.shadowColor = layerConfig.color;
     }
 
-    if (config.pattern === 'rain') {
+    if (layerConfig.pattern === 'rain') {
       dropsRef.current.forEach((drop) => {
         const dropX = drop.x;
         for (let j = 0; j < drop.length; j++) {
@@ -243,103 +337,93 @@ const DitheredPatternGenerator = () => {
           if (y < 0 || y >= rows) continue;
 
           const yInt = Math.floor(y);
-          const shapeBrightness = getShapeBrightness(dropX, yInt, cols, rows);
+          const shapeBrightness = getShapeBrightnessForLayer(dropX, yInt, cols, rows, layer);
           const alpha = (1 - (j / drop.length)) * shapeBrightness;
-          const brightness = config.gradient ? alpha : shapeBrightness;
+          const brightness = layerConfig.gradient ? alpha * layerConfig.gradientStrength + (1 - layerConfig.gradientStrength) : shapeBrightness;
           
           if (brightness > 0.1) {
             const brightnessHex = Math.floor(brightness * 255).toString(16).padStart(2, '0');
             ctx.fillStyle = colorBase + brightnessHex;
             
-            const targetBlur = config.glowEffect ? Math.floor(10 * brightness) : 0;
+            const targetBlur = layerConfig.glowEffect ? Math.floor(layerConfig.glowIntensity * brightness * (layerConfig.glowRadius / 10)) : 0;
             if (currentShadowBlur !== targetBlur) {
               ctx.shadowBlur = targetBlur;
               currentShadowBlur = targetBlur;
             }
 
             const seedIndex = (dropX + yInt) % randomSeedRef.current.length;
-            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r1 * symbols.length);
+            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r1 * layerSymbols.length);
             
             ctx.fillText(
-              symbols[symbolIndex],
+              layerSymbols[symbolIndex],
               dropX * cellSize + halfCell,
               yInt * cellSize + halfCell
             );
           }
         }
-
-        drop.y += drop.speed * 0.3;
-        if (drop.y > rows + drop.length) {
-          drop.y = -drop.length;
-          drop.speed = 0.5 + Math.random() * 1.5;
-        }
       });
-    } else if (config.pattern === 'wave') {
+    } else if (layerConfig.pattern === 'wave') {
       for (let i = 0; i < cols; i++) {
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
           const wave = Math.sin((i + frame * 0.1) * 0.3) * Math.cos((j + frame * 0.1) * 0.3);
           const waveAlpha = (wave + 1) / 2;
-          const shapeBrightness = getShapeBrightness(i, j, cols, rows);
+          const shapeBrightness = getShapeBrightnessForLayer(i, j, cols, rows, layer);
           const alpha = waveAlpha * shapeBrightness;
           
           const seedIndex = (i * rows + j) % randomSeedRef.current.length;
           
-          if (randomSeedRef.current[seedIndex].r1 < config.density * alpha) {
-            const brightness = config.gradient ? alpha : shapeBrightness;
+          if (randomSeedRef.current[seedIndex].r1 < layerConfig.density * alpha) {
+            const brightness = layerConfig.gradient ? alpha * layerConfig.gradientStrength + (1 - layerConfig.gradientStrength) * shapeBrightness : shapeBrightness;
             const brightnessHex = Math.floor(brightness * 255).toString(16).padStart(2, '0');
             ctx.fillStyle = colorBase + brightnessHex;
             
-            const targetBlur = config.glowEffect ? Math.floor(8 * brightness) : 0;
+            const targetBlur = layerConfig.glowEffect ? Math.floor(layerConfig.glowIntensity * brightness * (layerConfig.glowRadius / 10)) : 0;
             if (currentShadowBlur !== targetBlur) {
               ctx.shadowBlur = targetBlur;
               currentShadowBlur = targetBlur;
             }
 
-            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r2 * symbols.length);
+            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r2 * layerSymbols.length);
             ctx.fillText(
-              symbols[symbolIndex],
+              layerSymbols[symbolIndex],
               iCellPos,
               j * cellSize + halfCell
             );
           }
         }
       }
-    } else if (config.pattern === 'static') {
-      // True TV static - rapidly changing random noise
-      const frameOffset = (frame * 17) % randomSeedRef.current.length; // Use prime number for better distribution
+    } else if (layerConfig.pattern === 'static') {
+      const frameOffset = (frame * 17) % randomSeedRef.current.length;
       
       for (let i = 0; i < cols; i++) {
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
-          const shapeBrightness = getShapeBrightness(i, j, cols, rows);
-          // Use frame offset to get different random values each frame for static effect
+          const shapeBrightness = getShapeBrightnessForLayer(i, j, cols, rows, layer);
           const baseSeedIndex = (i * rows + j) % randomSeedRef.current.length;
           const seedIndex = (baseSeedIndex + frameOffset) % randomSeedRef.current.length;
           
-          if (randomSeedRef.current[seedIndex].r1 < config.density * shapeBrightness) {
-            const brightness = config.gradient ? randomSeedRef.current[seedIndex].r2 * shapeBrightness : shapeBrightness;
+          if (randomSeedRef.current[seedIndex].r1 < layerConfig.density * shapeBrightness) {
+            const brightness = layerConfig.gradient ? randomSeedRef.current[seedIndex].r2 * shapeBrightness * layerConfig.gradientStrength + (1 - layerConfig.gradientStrength) * shapeBrightness : shapeBrightness;
             const brightnessHex = Math.floor(brightness * 255).toString(16).padStart(2, '0');
             ctx.fillStyle = colorBase + brightnessHex;
             
-            const targetBlur = config.glowEffect ? Math.floor(6 * brightness) : 0;
+            const targetBlur = layerConfig.glowEffect ? Math.floor(layerConfig.glowIntensity * brightness * (layerConfig.glowRadius / 10)) : 0;
             if (currentShadowBlur !== targetBlur) {
               ctx.shadowBlur = targetBlur;
               currentShadowBlur = targetBlur;
             }
 
-            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r3 * symbols.length);
+            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r3 * layerSymbols.length);
             ctx.fillText(
-              symbols[symbolIndex],
+              layerSymbols[symbolIndex],
               iCellPos,
               j * cellSize + halfCell
             );
           }
         }
       }
-    } else if (config.pattern === 'glitch') {
-      // Glitch effect - mostly stable with occasional distortions
-      // Glitch triggers in bursts every 30-80 frames
+    } else if (layerConfig.pattern === 'glitch') {
       const glitchCycle = frame % 80;
       const isGlitching = glitchCycle < 5 || (glitchCycle > 30 && glitchCycle < 35);
       const glitchIntensity = isGlitching ? (Math.sin(frame * 0.5) + 1) / 2 : 0;
@@ -347,44 +431,41 @@ const DitheredPatternGenerator = () => {
       for (let i = 0; i < cols; i++) {
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
-          const shapeBrightness = getShapeBrightness(i, j, cols, rows);
-          // Stable base pattern (no frame in calculation)
+          const shapeBrightness = getShapeBrightnessForLayer(i, j, cols, rows, layer);
           const seedIndex = (i * rows + j) % randomSeedRef.current.length;
           
-          // Apply glitch effects only during glitch periods
           let offsetX = 0;
           let offsetY = 0;
           if (isGlitching) {
-            // Use frame to vary glitch effect
             const glitchSeedIndex = (seedIndex + frame) % randomSeedRef.current.length;
-            const shouldGlitch = randomSeedRef.current[glitchSeedIndex].r1 < 0.15; // 15% of cells glitch
+            const shouldGlitch = randomSeedRef.current[glitchSeedIndex].r1 < 0.15;
             if (shouldGlitch) {
               offsetX = (randomSeedRef.current[glitchSeedIndex].r2 - 0.5) * 30 * glitchIntensity;
               offsetY = (randomSeedRef.current[glitchSeedIndex].r3 - 0.5) * 10 * glitchIntensity;
             }
           }
           
-          if (randomSeedRef.current[seedIndex].r2 < config.density * shapeBrightness) {
-            const brightness = config.gradient ? (0.5 + randomSeedRef.current[seedIndex].r3 * 0.5) * shapeBrightness : shapeBrightness;
+          if (randomSeedRef.current[seedIndex].r2 < layerConfig.density * shapeBrightness) {
+            const brightness = layerConfig.gradient ? (0.5 + randomSeedRef.current[seedIndex].r3 * 0.5) * shapeBrightness * layerConfig.gradientStrength + (1 - layerConfig.gradientStrength) * shapeBrightness : shapeBrightness;
             const brightnessHex = Math.floor(brightness * 255).toString(16).padStart(2, '0');
             ctx.fillStyle = colorBase + brightnessHex;
             
-            const targetBlur = config.glowEffect ? Math.floor(8 * brightness) : 0;
+            const targetBlur = layerConfig.glowEffect ? Math.floor(layerConfig.glowIntensity * brightness * (layerConfig.glowRadius / 10)) : 0;
             if (currentShadowBlur !== targetBlur) {
               ctx.shadowBlur = targetBlur;
               currentShadowBlur = targetBlur;
             }
 
-            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r1 * symbols.length);
+            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r1 * layerSymbols.length);
             ctx.fillText(
-              symbols[symbolIndex],
+              layerSymbols[symbolIndex],
               iCellPos + offsetX,
               j * cellSize + halfCell + offsetY
             );
           }
         }
       }
-    } else if (config.pattern === 'pulse') {
+    } else if (layerConfig.pattern === 'pulse') {
       const pulse = (Math.sin(frame * 0.05) + 1) / 2;
       const centerX = cols / 2;
       const centerY = rows / 2;
@@ -394,27 +475,27 @@ const DitheredPatternGenerator = () => {
         const dx = i - centerX;
         const iCellPos = i * cellSize + halfCell;
         for (let j = 0; j < rows; j++) {
-          const shapeBrightness = getShapeBrightness(i, j, cols, rows);
+          const shapeBrightness = getShapeBrightnessForLayer(i, j, cols, rows, layer);
           const dy = j - centerY;
           const dist = Math.sqrt(dx * dx + dy * dy);
           const normalizedDist = dist / maxDist;
           
           const seedIndex = (i * rows + j) % randomSeedRef.current.length;
           
-          if (randomSeedRef.current[seedIndex].r1 < config.density * (1 - normalizedDist) * pulse * shapeBrightness) {
-            const brightness = config.gradient ? (1 - normalizedDist) * pulse * shapeBrightness : shapeBrightness;
+          if (randomSeedRef.current[seedIndex].r1 < layerConfig.density * (1 - normalizedDist) * pulse * shapeBrightness) {
+            const brightness = layerConfig.gradient ? (1 - normalizedDist) * pulse * shapeBrightness * layerConfig.gradientStrength + (1 - layerConfig.gradientStrength) * shapeBrightness : shapeBrightness;
             const brightnessHex = Math.floor(brightness * 255).toString(16).padStart(2, '0');
             ctx.fillStyle = colorBase + brightnessHex;
             
-            const targetBlur = config.glowEffect ? Math.floor(10 * brightness) : 0;
+            const targetBlur = layerConfig.glowEffect ? Math.floor(layerConfig.glowIntensity * brightness * (layerConfig.glowRadius / 10)) : 0;
             if (currentShadowBlur !== targetBlur) {
               ctx.shadowBlur = targetBlur;
               currentShadowBlur = targetBlur;
             }
 
-            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r2 * symbols.length);
+            const symbolIndex = Math.floor(randomSeedRef.current[seedIndex].r2 * layerSymbols.length);
             ctx.fillText(
-              symbols[symbolIndex],
+              layerSymbols[symbolIndex],
               iCellPos,
               j * cellSize + halfCell
             );
@@ -422,7 +503,54 @@ const DitheredPatternGenerator = () => {
         }
       }
     }
-  }, [canvasSize, config, symbols, getShapeBrightness]);
+  }, [canvasSize, getShapeBrightnessForLayer]);
+
+  // Main render function - composites all visible layers
+  const renderFrame = useCallback((frame: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const { width, height } = canvasSize;
+    if (width === 0 || height === 0) return;
+
+    // Clear main canvas with the bottom layer's background color (or default)
+    const bottomLayer = layers[0];
+    ctx.fillStyle = bottomLayer?.config.bgColor || '#0a0e27';
+    ctx.fillRect(0, 0, width, height);
+
+    // Create offscreen canvases for each visible layer and composite them
+    const visibleLayers = layers.filter(layer => layer.visible);
+    
+    visibleLayers.forEach((layer) => {
+      // Create an offscreen canvas for this layer
+      const offscreenCanvas = document.createElement('canvas');
+      offscreenCanvas.width = width;
+      offscreenCanvas.height = height;
+      
+      // Render layer to offscreen canvas
+      renderLayerToCanvas(layer, offscreenCanvas, frame);
+      
+      // Composite onto main canvas with layer opacity
+      ctx.globalAlpha = layer.opacity;
+      ctx.drawImage(offscreenCanvas, 0, 0);
+      ctx.globalAlpha = 1; // Reset
+    });
+
+    // Update drops for rain animation (shared across layers)
+    dropsRef.current.forEach((drop) => {
+      const cols = Math.floor(width / config.cellSize);
+      const rows = Math.floor(height / config.cellSize);
+      
+      drop.y += drop.speed * 0.3;
+      if (drop.y > rows + drop.length) {
+        drop.y = -drop.length;
+        drop.speed = 0.5 + Math.random() * 1.5;
+      }
+    });
+  }, [canvasSize, layers, renderLayerToCanvas, config.cellSize]);
 
   // Animation loop
   useEffect(() => {
@@ -484,8 +612,7 @@ const DitheredPatternGenerator = () => {
     
     type PresetKey = keyof typeof symbolPresets;
     
-    setConfig({
-      ...config,
+    updateActiveLayerConfig({
       symbolSet: symbolPresets[randomPreset as PresetKey],
       density: 0.3 + Math.random() * 0.6,
       pattern: randomPattern,
@@ -506,19 +633,19 @@ const DitheredPatternGenerator = () => {
         />
         
         {/* Shape Preview */}
-        {shapeImage && (
+        {activeLayer.shapeImage && (
           <div className="absolute top-6 left-6 bg-gray-800 p-3 rounded-lg shadow-lg">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-white text-sm font-medium">Shape Guide</span>
               <button
-                onClick={clearShape}
+                onClick={() => clearShape(activeLayerId)}
                 className="text-gray-400 hover:text-white transition-colors"
               >
                 <X size={16} />
               </button>
             </div>
             <img 
-              src={shapeImage.src} 
+              src={activeLayer.shapeImage.src} 
               alt="Shape guide" 
               className="w-24 h-24 object-contain bg-gray-700 rounded"
             />
@@ -548,7 +675,7 @@ const DitheredPatternGenerator = () => {
             <ChevronRight size={20} />
           </button>
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => fileInputRefs.current[activeLayerId]?.click()}
             className="bg-gray-800 hover:bg-gray-700 text-white p-3 rounded-lg shadow-lg transition-colors"
           >
             <Upload size={20} />
@@ -568,10 +695,10 @@ const DitheredPatternGenerator = () => {
         </div>
 
         <input
-          ref={fileInputRef}
+          ref={(el) => { fileInputRefs.current[activeLayerId] = el; }}
           type="file"
           accept="image/*"
-          onChange={handleImageUpload}
+          onChange={(e) => handleImageUpload(e, activeLayerId)}
           className="hidden"
         />
       </div>
@@ -579,6 +706,99 @@ const DitheredPatternGenerator = () => {
       {/* Control Panel */}
       <div className="w-80 bg-gray-800 p-6 overflow-y-auto space-y-6">
         <h2 className="text-xl font-bold text-white mb-4">Pattern Controls</h2>
+
+        {/* Layers Section */}
+        <div className="bg-gray-700 rounded-lg p-4 space-y-2">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-semibold text-white">Layers</h3>
+            <button
+              onClick={addLayer}
+              disabled={layers.length >= 3}
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors"
+            >
+              <Plus size={16} />
+              Add
+            </button>
+          </div>
+
+          {layers.map((layer, index) => (
+            <div
+              key={layer.id}
+              className={`bg-gray-800 rounded p-3 border-2 transition-colors ${
+                layer.id === activeLayerId ? 'border-blue-500' : 'border-transparent'
+              }`}
+              draggable
+              onDragStart={() => setDraggedLayerId(layer.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={() => {
+                if (draggedLayerId) {
+                  const fromIndex = layers.findIndex(l => l.id === draggedLayerId);
+                  reorderLayers(fromIndex, index);
+                }
+              }}
+              onDragEnd={() => setDraggedLayerId(null)}
+            >
+              <div className="flex items-center gap-2">
+                <button className="cursor-move text-gray-400 hover:text-white">
+                  <RxDragHandleDots2 size={20} />
+                </button>
+
+                <button
+                  onClick={() => updateLayerProperty(layer.id, { visible: !layer.visible })}
+                  className="text-gray-300 hover:text-white"
+                >
+                  {layer.visible ? <Eye size={18} /> : <EyeOff size={18} />}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setActiveLayerId(layer.id);
+                    toggleLayerExpand(layer.id);
+                  }}
+                  className="flex-1 text-left text-white font-medium text-sm flex items-center gap-2"
+                >
+                  {expandedLayerIds.has(layer.id) ? <ChevronDown size={16} /> : <ChevronRightIcon size={16} />}
+                  <input
+                    type="text"
+                    value={layer.name}
+                    onChange={(e) => updateLayerProperty(layer.id, { name: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex-1 bg-transparent border-none outline-none"
+                  />
+                </button>
+
+                {layers.length > 1 && (
+                  <button
+                    onClick={() => removeLayer(layer.id)}
+                    className="text-red-400 hover:text-red-300"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+
+              {/* Layer Opacity */}
+              <div className="mt-2 ml-7">
+                <label className="text-xs text-gray-400">
+                  Opacity: {Math.round(layer.opacity * 100)}%
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={layer.opacity}
+                  onChange={(e) => updateLayerProperty(layer.id, { opacity: parseFloat(e.target.value) })}
+                  className="w-full h-1"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="border-t border-gray-700 pt-4">
+          <h3 className="text-sm font-semibold text-gray-400 mb-3">Active Layer Settings</h3>
+        </div>
 
         {/* Frame Info */}
         <div className="bg-gray-700 p-3 rounded">
@@ -599,7 +819,7 @@ const DitheredPatternGenerator = () => {
             value={Object.keys(symbolPresets).find(key => symbolPresets[key as keyof typeof symbolPresets] === config.symbolSet) || 'Custom'}
             onChange={(e) => {
               type PresetKey = keyof typeof symbolPresets;
-              setConfig({...config, symbolSet: symbolPresets[e.target.value as PresetKey] || config.symbolSet});
+              updateActiveLayerConfig({ symbolSet: symbolPresets[e.target.value as PresetKey] || config.symbolSet });
             }}
             className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
@@ -617,7 +837,7 @@ const DitheredPatternGenerator = () => {
           <input
             type="text"
             value={config.symbolSet}
-            onChange={(e) => setConfig({...config, symbolSet: e.target.value || '01'})}
+            onChange={(e) => updateActiveLayerConfig({ symbolSet: e.target.value || '01' })}
             className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="Enter symbols..."
           />
@@ -630,7 +850,7 @@ const DitheredPatternGenerator = () => {
           </label>
           <select
             value={config.pattern}
-            onChange={(e) => setConfig({...config, pattern: e.target.value})}
+            onChange={(e) => updateActiveLayerConfig({ pattern: e.target.value })}
             className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             {patternTypes.map(type => (
@@ -642,7 +862,7 @@ const DitheredPatternGenerator = () => {
         </div>
 
         {/* Shape Influence */}
-        {shapeData && (
+        {activeLayer.shapeData && (
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
               Shape Influence: {config.shapeInfluence.toFixed(2)}
@@ -653,7 +873,7 @@ const DitheredPatternGenerator = () => {
               max="1"
               step="0.05"
               value={config.shapeInfluence}
-              onChange={(e) => setConfig({...config, shapeInfluence: parseFloat(e.target.value)})}
+              onChange={(e) => updateActiveLayerConfig({ shapeInfluence: parseFloat(e.target.value) })}
               className="w-full"
             />
             <p className="text-xs text-gray-400 mt-1">
@@ -673,7 +893,7 @@ const DitheredPatternGenerator = () => {
             max="1"
             step="0.05"
             value={config.density}
-            onChange={(e) => setConfig({...config, density: parseFloat(e.target.value)})}
+              onChange={(e) => updateActiveLayerConfig({ density: parseFloat(e.target.value) })}
             className="w-full"
           />
         </div>
@@ -689,7 +909,7 @@ const DitheredPatternGenerator = () => {
             max="24"
             step="2"
             value={config.cellSize}
-            onChange={(e) => setConfig({...config, cellSize: parseInt(e.target.value)})}
+            onChange={(e) => updateActiveLayerConfig({ cellSize: parseInt(e.target.value) })}
             className="w-full"
           />
         </div>
@@ -705,7 +925,7 @@ const DitheredPatternGenerator = () => {
             max="200"
             step="10"
             value={config.animationSpeed}
-            onChange={(e) => setConfig({...config, animationSpeed: parseInt(e.target.value)})}
+            onChange={(e) => updateActiveLayerConfig({ animationSpeed: parseInt(e.target.value) })}
             className="w-full"
           />
         </div>
@@ -718,7 +938,7 @@ const DitheredPatternGenerator = () => {
           <input
             type="color"
             value={config.color}
-            onChange={(e) => setConfig({...config, color: e.target.value})}
+            onChange={(e) => updateActiveLayerConfig({ color: e.target.value })}
             className="w-full h-10 rounded cursor-pointer"
           />
         </div>
@@ -731,7 +951,7 @@ const DitheredPatternGenerator = () => {
           <input
             type="color"
             value={config.bgColor}
-            onChange={(e) => setConfig({...config, bgColor: e.target.value})}
+            onChange={(e) => updateActiveLayerConfig({ bgColor: e.target.value })}
             className="w-full h-10 rounded cursor-pointer"
           />
         </div>
@@ -741,7 +961,7 @@ const DitheredPatternGenerator = () => {
           <input
             type="checkbox"
             checked={config.gradient}
-            onChange={(e) => setConfig({...config, gradient: e.target.checked})}
+            onChange={(e) => updateActiveLayerConfig({ gradient: e.target.checked })}
             className="w-4 h-4 mr-2"
           />
           <label className="text-sm font-medium text-gray-300">
@@ -749,18 +969,73 @@ const DitheredPatternGenerator = () => {
           </label>
         </div>
 
+        {/* Gradient Strength */}
+        {config.gradient && (
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Gradient Strength: {config.gradientStrength.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={config.gradientStrength}
+              onChange={(e) => updateActiveLayerConfig({ gradientStrength: parseFloat(e.target.value) })}
+              className="w-full"
+            />
+          </div>
+        )}
+
         {/* Glow Toggle */}
         <div className="flex items-center">
           <input
             type="checkbox"
             checked={config.glowEffect}
-            onChange={(e) => setConfig({...config, glowEffect: e.target.checked})}
+            onChange={(e) => updateActiveLayerConfig({ glowEffect: e.target.checked })}
             className="w-4 h-4 mr-2"
           />
           <label className="text-sm font-medium text-gray-300">
             Glow Effect
           </label>
         </div>
+
+        {/* Glow Intensity */}
+        {config.glowEffect && (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Glow Intensity: {config.glowIntensity}
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="20"
+                step="1"
+                value={config.glowIntensity}
+                onChange={(e) => updateActiveLayerConfig({ glowIntensity: parseInt(e.target.value) })}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Glow Radius: {config.glowRadius}
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="30"
+                step="1"
+                value={config.glowRadius}
+                onChange={(e) => updateActiveLayerConfig({ glowRadius: parseInt(e.target.value) })}
+                className="w-full"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Higher = more spread
+              </p>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
